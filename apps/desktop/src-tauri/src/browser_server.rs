@@ -19,8 +19,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use dlman_core::DlmanCore;
-use dlman_types::{CoreEvent, Download, MediaDownloadRequest, MediaDownloadResponse, MediaProtocol};
+use dlman_types::{
+    CoreEvent, Download, DownloadStatus, MediaDownloadRequest, MediaDownloadResponse, MediaProtocol,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -28,6 +31,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
+use uuid::Uuid;
 
 // ============================================================================
 // Request/Response types
@@ -70,6 +74,53 @@ pub struct StatusResponse {
 pub struct ControlResponse {
     pub success: bool,
     pub error: Option<String>,
+}
+
+/// Public projection of [`Download`] for the browser-extension API.
+///
+/// The extension only needs the fields below, so the response is built from an explicit list
+/// instead of serialising the internal model. Internal fields such as `cookies` and
+/// `destination` stay out of the API, and a field added to [`Download`] later only shows up
+/// here if it is added below as well.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadSummary {
+    pub id: Uuid,
+    pub url: String,
+    pub final_url: Option<String>,
+    pub filename: String,
+    pub size: Option<u64>,
+    pub downloaded: u64,
+    pub status: DownloadStatus,
+    pub queue_id: Uuid,
+    pub category_id: Option<Uuid>,
+    pub color: Option<String>,
+    pub error: Option<String>,
+    pub speed_limit: Option<u64>,
+    pub retry_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl From<&Download> for DownloadSummary {
+    fn from(d: &Download) -> Self {
+        Self {
+            id: d.id,
+            url: d.url.clone(),
+            final_url: d.final_url.clone(),
+            filename: d.filename.clone(),
+            size: d.size,
+            downloaded: d.downloaded,
+            status: d.status,
+            queue_id: d.queue_id,
+            category_id: d.category_id,
+            color: d.color.clone(),
+            error: d.error.clone(),
+            speed_limit: d.speed_limit,
+            retry_count: d.retry_count,
+            created_at: d.created_at,
+            completed_at: d.completed_at,
+        }
+    }
 }
 
 // ============================================================================
@@ -334,8 +385,13 @@ async fn handle_get_downloads(
 ) -> impl axum::response::IntoResponse {
     let state = state.read().await;
     match state.core.get_all_downloads().await {
-        Ok(downloads) => axum::Json(downloads),
-        Err(_) => axum::Json(Vec::<Download>::new()),
+        Ok(downloads) => axum::Json(
+            downloads
+                .iter()
+                .map(DownloadSummary::from)
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => axum::Json(Vec::<DownloadSummary>::new()),
     }
 }
 
@@ -625,4 +681,45 @@ async fn handle_ws_connection(socket: WebSocket, state: SharedState) {
     // Cleanup
     forward_task.abort();
     send_task.abort();
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The download list carries only the fields the extension uses. Guards against
+    /// `DownloadSummary` being replaced by `Download`.
+    #[test]
+    fn download_summary_omits_cookies_and_destination() {
+        let mut download = Download::new(
+            "https://example.com/archive.zip".to_string(),
+            PathBuf::from("/home/someone/Downloads/archive.zip"),
+            Uuid::new_v4(),
+        );
+        download.cookies = Some("session=super-secret-value".to_string());
+
+        let json =
+            serde_json::to_string(&DownloadSummary::from(&download)).expect("summary serialises");
+
+        assert!(!json.contains("cookies"), "cookie field leaked: {json}");
+        assert!(
+            !json.contains("super-secret-value"),
+            "cookie value leaked: {json}"
+        );
+        assert!(
+            !json.contains("destination"),
+            "destination field leaked: {json}"
+        );
+        assert!(!json.contains("/home/someone"), "local path leaked: {json}");
+
+        // The fields the extension actually consumes must survive the projection.
+        assert!(json.contains("archive.zip"));
+        assert!(json.contains("\"downloaded\""));
+        assert!(json.contains("\"status\""));
+    }
 }

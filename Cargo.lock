@@ -1194,6 +1194,7 @@ name = "dlman-desktop"
 version = "1.11.1"
 dependencies = [
  "axum",
+ "chrono",
  "directories",
  "dlman-core",
  "dlman-types",
