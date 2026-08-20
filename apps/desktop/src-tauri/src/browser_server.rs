@@ -12,10 +12,11 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Request, State, WebSocketUpgrade,
     },
-    http::{header, Method},
-    response::IntoResponse,
+    http::{header, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -211,6 +212,7 @@ impl BrowserServer {
             // WebSocket for real-time events (optional)
             .route("/ws", get(handle_websocket))
             .layer(cors)
+            .layer(middleware::from_fn(require_extension_origin))
             .with_state(shared_state);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
@@ -233,6 +235,31 @@ impl BrowserServer {
             let _ = tx.send(());
         }
     }
+}
+
+// ============================================================================
+// Origin guard
+// ============================================================================
+
+/// Only serves requests from the browser extension.
+///
+/// The extension is identified by its `Origin` scheme rather than a fixed id, because Firefox
+/// assigns a new `moz-extension://` UUID per installation.
+///
+/// Requests without an `Origin` are allowed: Chrome may omit it for fetches covered by the
+/// extension's host permissions.
+async fn require_extension_origin(request: Request, next: Next) -> Result<Response, StatusCode> {
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or_default();
+        let is_extension = origin.starts_with("chrome-extension://")
+            || origin.starts_with("moz-extension://")
+            || origin.starts_with("safari-web-extension://");
+        if !is_extension {
+            tracing::warn!("browser server: rejected request from origin {}", origin);
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    Ok(next.run(request).await)
 }
 
 // ============================================================================
