@@ -18,6 +18,7 @@ mod error;
 pub mod filename;
 pub mod media;
 mod queue;
+pub mod request_scope;
 mod scheduler;
 mod storage;
 
@@ -1092,6 +1093,7 @@ impl DlmanCore {
 
         // 8. Spawn the management task and register its abort handle
         let core = self.clone();
+        let master_url_owned = master_url.to_string();
         let cookies_clone = cookies.clone();
         let referrer_clone = referrer.clone();
         let cancel_for_task = cancel_token.clone();
@@ -1103,6 +1105,7 @@ impl DlmanCore {
                 &http_client,
                 &segment_urls,
                 &out_path,
+                &master_url_owned,
                 cookies_clone.as_deref(),
                 referrer_clone.as_deref(),
                 &cancel_for_task,
@@ -1205,6 +1208,7 @@ impl DlmanCore {
         client: &reqwest::Client,
         segment_urls: &[String],
         out_path: &std::path::Path,
+        master_url: &str,
         cookies: Option<&str>,
         referrer: Option<&str>,
         cancel_token: &AtomicBool,
@@ -1278,7 +1282,11 @@ impl DlmanCore {
             let bytes_counter = downloaded_bytes.clone();
             let seg_counter = completed_segments.clone();
             let core_clone = core.clone();
-            let cookies_owned = cookies.map(|s| s.to_string());
+            // Cookies belong to the master playlist's host; segments served
+            // from anywhere else are fetched without them.
+            let cookies_owned = cookies
+                .filter(|_| request_scope::may_send_site_auth(master_url, &seg_url))
+                .map(|s| s.to_string());
             let referrer_owned = referrer.map(|s| s.to_string());
             let failed_flag = failed.clone();
 
