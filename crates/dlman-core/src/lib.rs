@@ -994,6 +994,11 @@ impl DlmanCore {
             "video.ts".to_string()
         });
 
+        // The name may come from the caller, the page title or the URL; reduce it
+        // to a plain filename before it is joined onto the destination.
+        let out_filename = filename::sanitize_filename(&out_filename)
+            .unwrap_or_else(|| "video.ts".to_string());
+
         // Ensure .ts extension for concatenated HLS segments
         let out_filename = if !out_filename.ends_with(".ts") && !out_filename.ends_with(".mp4") {
             format!("{}.ts", out_filename.trim_end_matches(".m3u8"))
