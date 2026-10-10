@@ -213,6 +213,7 @@ impl BrowserServer {
             .route("/ws", get(handle_websocket))
             .layer(cors)
             .layer(middleware::from_fn(require_extension_origin))
+            .layer(middleware::from_fn(require_loopback_host))
             .with_state(shared_state);
 
         let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
@@ -260,6 +261,42 @@ async fn require_extension_origin(request: Request, next: Next) -> Result<Respon
         }
     }
     Ok(next.run(request).await)
+}
+
+/// Only serves requests addressed to this machine by a loopback name.
+///
+/// The server binds `127.0.0.1` and the extension calls it as `localhost`, so the `Host` header
+/// is always one of `localhost`, `127.0.0.1` or `[::1]` (with the port). Anything else gets 403.
+async fn require_loopback_host(request: Request, next: Next) -> Result<Response, StatusCode> {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !is_loopback_host(host) {
+        tracing::warn!("browser server: rejected request for host {:?}", host);
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
+/// Whether a `Host` header value names this machine: `localhost`, `127.0.0.1` or `[::1]`,
+/// optionally followed by `:port`.
+fn is_loopback_host(host: &str) -> bool {
+    let name = if host.starts_with('[') {
+        match host.find(']') {
+            Some(end) => &host[..=end],
+            None => return false,
+        }
+    } else {
+        host.split(':').next().unwrap_or_default()
+    };
+    let rest = &host[name.len()..];
+    let port_ok = rest.is_empty()
+        || rest
+            .strip_prefix(':')
+            .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    port_ok && ["localhost", "127.0.0.1", "[::1]"].iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 // ============================================================================
@@ -718,6 +755,31 @@ async fn handle_ws_connection(socket: WebSocket, state: SharedState) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn loopback_host_names_are_accepted() {
+        for host in ["localhost:7899", "LOCALHOST:7899", "127.0.0.1:7899", "[::1]:7899", "localhost"] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn other_host_names_are_refused() {
+        for host in [
+            "",
+            "example.com:7899",
+            "localhost.example.com:7899",
+            "127.0.0.1.example.com",
+            "localhost:7899:1",
+            "localhost:",
+            "localhost:abc",
+            "[::1",
+            "[::2]:7899",
+            "0.0.0.0:7899",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
 
     /// The download list carries only the fields the extension uses. Guards against
     /// `DownloadSummary` being replaced by `Download`.
