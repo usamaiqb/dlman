@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 directories = { workspace = true }
 urlencoding = "2"
+open = { version = "5.4", features = ["shellexecute-on-windows"] }
 
 # Browser extension integration server
 axum = { version = "0.7", features = ["ws"] }
